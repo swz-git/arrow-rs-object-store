@@ -154,6 +154,73 @@ impl Signer for AmazonS3 {
     }
 }
 
+impl AmazonS3 {
+    /// Create a URL containing the relevant [AWS SigV4] query parameters that authorize a request
+    /// via `method` to the resource at `path` valid for the duration specified in `expires_in`.
+    ///
+    /// This function also allows customization of the url before signing.
+    ///
+    /// [AWS SigV4]: https://docs.aws.amazon.com/IAM/latest/UserGuide/create-signed-request.html
+    ///
+    /// # Example
+    ///
+    /// This example returns a URL that will enable a user to upload a file to
+    /// "some-folder/some-file.txt" in the next hour. It also sets content-disposition using the
+    /// `response-content-disposition` query parameter
+    ///
+    /// ```
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use object_store::{aws::AmazonS3Builder, path::Path, signer::Signer};
+    /// # use reqwest::Method;
+    /// # use std::time::Duration;
+    /// #
+    /// let region = "us-east-1";
+    /// let s3 = AmazonS3Builder::new()
+    ///     .with_region(region)
+    ///     .with_bucket_name("my-bucket")
+    ///     .with_access_key_id("my-access-key-id")
+    ///     .with_secret_access_key("my-secret-access-key")
+    ///     .build()?;
+    ///
+    /// let url = s3.signed_url_custom(
+    ///     Method::PUT,
+    ///     &Path::from("some-folder/some-file.txt"),
+    ///     |url| {
+    ///         url.query_pairs_mut().append_pair(
+    ///             "response-content-disposition",
+    ///             &format!("attachment; filename=\"{}\"", self.name),
+    ///         );
+    ///     },
+    ///     Duration::from_secs(60 * 60)
+    /// ).await?;
+    /// #     Ok(())
+    /// # }
+    /// ```
+    pub async fn signed_url_custom(
+        &self,
+        method: Method,
+        path: &Path,
+        mut url_customizer: impl FnMut(&mut Url),
+        expires_in: Duration,
+    ) -> Result<Url> {
+        let credential = self.credentials().get_credential().await?;
+        let authorizer = AwsAuthorizer::new(&credential, "s3", &self.client.config.region)
+            .with_request_payer(self.client.config.request_payer);
+
+        let path_url = self.path_url(path);
+        let mut url = path_url.parse().map_err(|e| Error::Generic {
+            store: STORE,
+            source: format!("Unable to parse url {path_url}: {e}").into(),
+        })?;
+
+        url_customizer(&mut url);
+
+        authorizer.sign(method, &mut url, expires_in);
+
+        Ok(url)
+    }
+}
+
 #[async_trait]
 impl ObjectStore for AmazonS3 {
     async fn put_opts(
